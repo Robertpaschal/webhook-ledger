@@ -1,0 +1,104 @@
+{
+  "name": "webhook-ledger",
+  "version": "0.1.0",
+  "description": "Verified, idempotent Paystack, Flutterwave and Stripe webhooks with a Postgres ledger and a reconciliation CLI.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Odinaka Robert Nnamani (https://heypascal.me)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Robertpaschal/webhook-ledger.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Robertpaschal/webhook-ledger/issues"
+  },
+  "homepage": "https://robertpaschal.github.io/webhook-ledger/",
+  "keywords": [
+    "webhooks",
+    "paystack",
+    "flutterwave",
+    "stripe",
+    "idempotency",
+    "hmac",
+    "signature",
+    "postgres",
+    "reconciliation",
+    "payments"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "webhook-ledger": "./dist/cli.js"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./drizzle": {
+      "import": {
+        "types": "./dist/drizzle.d.ts",
+        "default": "./dist/drizzle.js"
+      },
+      "require": {
+        "types": "./dist/drizzle.d.cts",
+        "default": "./dist/drizzle.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "sql",
+    "LICENSE",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build",
+    "docs": "node scripts/build-docs.mjs"
+  },
+  "peerDependencies": {
+    "drizzle-orm": ">=0.30.0",
+    "pg": ">=8.0.0"
+  },
+  "peerDependenciesMeta": {
+    "drizzle-orm": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.20.5",
+    "@types/pg": "^8.23.1",
+    "drizzle-orm": "^0.45.4",
+    "eslint": "^9.39.5",
+    "express": "^5.3.0",
+    "fastify": "^5.12.8",
+    "globals": "^17.14.0",
+    "marked": "^15.0.12",
+    "pg": "^8.23.1",
+    "stripe": "^23.2.0",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.74.0",
+    "vitest": "^3.2.7"
+  }
+}

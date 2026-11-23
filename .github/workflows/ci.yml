@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    name: test (node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 22]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ledger
+          POSTGRES_PASSWORD: ledger
+          POSTGRES_DB: webhook_ledger
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ledger -d webhook_ledger"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      # Fastify 5 needs Node 20+, so Node 18 runs the adapter tests against Fastify 4.
+      - name: Use Fastify 4 on Node 18
+        if: matrix.node == 18
+        run: npm install --no-save fastify@4
+      - run: npm run typecheck
+      - run: npm run lint
+      # The database suites throw when CI is set and POSTGRES_URL is missing,
+      # so this step cannot pass by skipping them.
+      - run: npm test
+        env:
+          POSTGRES_URL: postgres://ledger:ledger@localhost:5432/webhook_ledger
+      - run: npm run build
+      - name: Smoke-test the packed tarball
+        run: |
+          npm pack
+          mkdir -p /tmp/smoke && cd /tmp/smoke && npm init -y >/dev/null
+          npm install "$GITHUB_WORKSPACE"/webhook-ledger-*.tgz pg
+          npx webhook-ledger migrate
+          node -e "const w = require('webhook-ledger'); if (typeof w.verifyStripe !== 'function') process.exit(1)"
+        env:
+          DATABASE_URL: postgres://ledger:ledger@localhost:5432/webhook_ledger
