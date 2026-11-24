@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>webhook-ledger: verified, idempotent payment webhooks</title>
+<meta name="description" content="Verified, idempotent Paystack, Flutterwave and Stripe webhooks with a Postgres ledger and a reconciliation CLI.">
+<style>
+:root { --bg:#fbfaf7; --fg:#1d1b18; --muted:#5e5a53; --line:#e4e0d8; --code:#f2efe8; --accent:#0f6b4f; }
+@media (prefers-color-scheme: dark) { :root { --bg:#15140f; --fg:#ece8df; --muted:#a8a296; --line:#2e2b25; --code:#211f19; --accent:#5fd0a5; } }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.65 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 860px; margin: 0 auto; padding: 32px 16px 80px; }
+header.top { display:flex; flex-wrap:wrap; gap:12px 20px; align-items:baseline; justify-content:space-between; border-bottom:1px solid var(--line); padding-bottom:12px; margin-bottom:8px; font-size:14px; color:var(--muted); }
+header.top a { color: var(--accent); }
+h1 { font-size: 2.1rem; margin: 24px 0 8px; letter-spacing:-0.02em; }
+h2 { margin-top: 2.4em; padding-top: 0.4em; border-top: 1px solid var(--line); }
+a { color: var(--accent); }
+code { font: 0.9em ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--code); padding: 0.1em 0.35em; border-radius: 4px; }
+pre { background: var(--code); padding: 14px 16px; border-radius: 8px; overflow-x: auto; border:1px solid var(--line); }
+pre code { background: none; padding: 0; }
+table { border-collapse: collapse; width: 100%; display:block; overflow-x:auto; font-size: 0.93em; }
+th, td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top; }
+th { background: var(--code); }
+</style>
+</head>
+<body>
+<main>
+<header class="top"><span>v0.1.0 · MIT</span><span><a href="playground/">Playground</a> · <a href="https://github.com/Robertpaschal/webhook-ledger">GitHub</a> · <a href="https://www.npmjs.com/package/webhook-ledger">npm</a> · <a href="https://github.com/Robertpaschal/webhook-ledger/issues">Issues</a></span></header>
+<h1>webhook-ledger</h1>
+<p>Verified, idempotent payment webhooks for Node.js: signature checks for <strong>Paystack</strong>, <strong>Flutterwave</strong> and <strong>Stripe</strong>, a small <strong>Postgres ledger</strong> that applies each event once even when the provider retries, and a <strong>reconciliation CLI</strong> that compares what you recorded with what the provider says happened.</p>
+<pre><code class="language-bash">npm install webhook-ledger pg
+</code></pre>
+<h2>Why</h2>
+<p>Payment webhooks fail in three boring ways:</p>
+<ol>
+<li><strong>Unverified bodies.</strong> Verifying a re-serialised <code>req.body</code> instead of the raw bytes passes in tests and breaks (or silently accepts the wrong thing) in production.</li>
+<li><strong>Double application.</strong> Providers retry until they get a 2xx. A slow handler, a deploy or a timeout means the same <code>charge.success</code> arrives twice and a wallet is credited twice.</li>
+<li><strong>Silent drift.</strong> A webhook that never arrived, or a handler that failed after the provider gave up retrying, leaves your database disagreeing with the provider, and nothing tells you.</li>
+</ol>
+<p>webhook-ledger handles each one: verify against the raw body with constant-time comparison, record the event under a unique key and run your handler inside the same transaction, and reconcile the result against the provider&#39;s transaction list.</p>
+<h2>Quick start (Express)</h2>
+<pre><code class="language-ts">import express from &quot;express&quot;;
+import pg from &quot;pg&quot;;
+import { Ledger, expressWebhook, recordPayment } from &quot;webhook-ledger&quot;;
+
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+const ledger = new Ledger(pool);
+await ledger.migrate(); // or run sql/001_init.sql with your own migration tool
+
+const app = express();
+
+app.post(
+  &quot;/webhooks/paystack&quot;,
+  express.raw({ type: &quot;*/*&quot; }), // the raw bytes are what Paystack signed
+  expressWebhook({
+    provider: &quot;paystack&quot;,
+    options: {
+      signingSecret: process.env.PAYSTACK_WEBHOOK_SECRET, // whsec_… (Paystack-Signature)
+      secretKey: process.env.PAYSTACK_SECRET_KEY,         // sk_… (deprecated X-Paystack-Signature)
+    },
+    ledger,
+    handler: async ({ event, client }) =&gt; {
+      if (event.eventType !== &quot;charge.success&quot;) return;
+      const { reference, amount, currency, status } = (event.payload as any).data;
+      // Use `client`: these writes commit or roll back with the event&#39;s processed mark.
+      await client.query(&quot;UPDATE orders SET paid = true WHERE reference = $1&quot;, [reference]);
+      await recordPayment(client, { provider: &quot;paystack&quot;, reference, amountMinor: amount, currency, status, eventKey: event.eventKey });
+    },
+  }),
+);
+</code></pre>
+<p>Responses are chosen so providers retry exactly when they should:</p>
+<table>
+<thead>
+<tr>
+<th>Situation</th>
+<th>Status</th>
+<th>Ledger</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Valid, first delivery, handler succeeded</td>
+<td><code>200 {status:&quot;processed&quot;}</code></td>
+<td>row marked <code>processed</code></td>
+</tr>
+<tr>
+<td>Valid, already processed</td>
+<td><code>200 {status:&quot;duplicate&quot;}</code></td>
+<td>unchanged, handler not called</td>
+</tr>
+<tr>
+<td>Valid, handler threw</td>
+<td><code>500 {status:&quot;failed&quot;}</code></td>
+<td>handler writes rolled back, row marked <code>failed</code> with the error, next delivery retries</td>
+</tr>
+<tr>
+<td>Bad, missing or stale signature</td>
+<td><code>401</code></td>
+<td>nothing written</td>
+</tr>
+<tr>
+<td>Body is not JSON</td>
+<td><code>400</code></td>
+<td>nothing written</td>
+</tr>
+<tr>
+<td>No secret configured, or raw body unavailable</td>
+<td><code>500</code></td>
+<td>nothing written</td>
+</tr>
+</tbody></table>
+<h2>Fastify</h2>
+<pre><code class="language-ts">import Fastify from &quot;fastify&quot;;
+import { fastifyWebhook } from &quot;webhook-ledger&quot;;
+
+const app = Fastify();
+await app.register(fastifyWebhook, {
+  path: &quot;/webhooks/stripe&quot;,
+  provider: &quot;stripe&quot;,
+  options: { signingSecret: process.env.STRIPE_WEBHOOK_SECRET },
+  ledger,
+  handler: async ({ event, client }) =&gt; { /* … */ },
+});
+</code></pre>
+<p>The plugin replaces the body parsers inside its own encapsulated context so the route receives the raw <code>Buffer</code>; the rest of your app keeps its JSON parser.</p>
+<h2>Verification only</h2>
+<p>You can use the verifiers without the ledger:</p>
+<pre><code class="language-ts">import { verifyPaystack, verifyFlutterwave, verifyStripe } from &quot;webhook-ledger&quot;;
+
+const result = verifyStripe(
+  { rawBody: req.body /* Buffer */, headers: req.headers },
+  { signingSecret: process.env.STRIPE_WEBHOOK_SECRET },
+);
+if (!result.ok) return res.status(401).end(); // result.reason: &quot;signature_mismatch&quot; | &quot;timestamp_outside_tolerance&quot; | …
+result.eventKey;  // &quot;evt_…&quot;
+result.payload;   // parsed JSON
+</code></pre>
+<p>Every verifier refuses a parsed object (<code>invalid_body</code>) rather than guessing its bytes.</p>
+<h3>What each provider check does</h3>
+<table>
+<thead>
+<tr>
+<th>Provider</th>
+<th>Header</th>
+<th>Check</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Paystack (current)</td>
+<td><code>Paystack-Signature: t=&lt;unix seconds&gt;,v1=&lt;key id&gt;:&lt;hex&gt;</code></td>
+<td>HMAC-SHA512 over <code>&quot;{t}.{raw body}&quot;</code>, keyed with the whole <code>whsec_…</code> signing secret; any <code>v1</code> entry may match (rotation sends one per live secret); timestamp must be within <code>toleranceSeconds</code> (default 300).</td>
+</tr>
+<tr>
+<td>Paystack (deprecated)</td>
+<td><code>X-Paystack-Signature: &lt;hex&gt;</code></td>
+<td>HMAC-SHA512 of the raw body keyed with your secret key. Accepted when <code>secretKey</code> is set, unless <code>allowLegacy: false</code>. Never used as a fallback when a <code>Paystack-Signature</code> header is present and fails.</td>
+</tr>
+<tr>
+<td>Flutterwave</td>
+<td><code>verif-hash: &lt;secret hash&gt;</code></td>
+<td>Constant-time equality with the secret hash from your dashboard.</td>
+</tr>
+<tr>
+<td>Stripe</td>
+<td><code>Stripe-Signature: t=…,v1=…</code></td>
+<td>HMAC-SHA256 over <code>&quot;{t}.{raw body}&quot;</code> keyed with the <code>whsec_…</code> endpoint secret; any <code>v1</code> may match; <code>v0</code> is ignored; tolerance 300s. Tested against headers generated by Stripe&#39;s own Node SDK.</td>
+</tr>
+</tbody></table>
+<h3>Idempotency keys</h3>
+<table>
+<thead>
+<tr>
+<th>Provider</th>
+<th>Default <code>eventKey</code></th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Stripe</td>
+<td><code>event.id</code></td>
+</tr>
+<tr>
+<td>Paystack</td>
+<td><code>&quot;{event}:{data.id}&quot;</code>, falling back to <code>data.reference</code>, <code>data.transfer_code</code>, <code>data.subscription_code</code>, <code>data.code</code> (Paystack payloads carry no event id)</td>
+</tr>
+<tr>
+<td>Flutterwave</td>
+<td><code>&quot;{event}:{data.id}&quot;</code>, falling back to <code>data.tx_ref</code>, <code>data.flw_ref</code></td>
+</tr>
+</tbody></table>
+<p>Pass <code>eventKey: (payload) =&gt; string</code> in the options to choose your own. Keys are unique per provider.</p>
+<h3>Try it in the browser</h3>
+<p>The <a href="https://robertpaschal.github.io/webhook-ledger/playground/">playground</a> signs a test body the way each provider would and checks it with the same rules, so you can watch a re-serialised body, a stale timestamp or the wrong secret fail. It runs entirely in the page with Web Crypto. Its signing code is tested against the library in both directions (<code>tests/playground.test.ts</code>), so the two cannot drift silently. It is a teaching aid: on a server, use the library.</p>
+<h2>How &quot;once&quot; is enforced</h2>
+<p><code>Ledger.process(event, handler)</code> runs in one transaction:</p>
+<ol>
+<li><code>INSERT … ON CONFLICT (provider, event_key) DO NOTHING</code></li>
+<li><code>SELECT status … FOR UPDATE</code>. Concurrent deliveries of the same event wait here.</li>
+<li>If the row is already <code>processed</code>, commit and return <code>duplicate</code> without calling the handler.</li>
+<li>Otherwise run the handler with the transaction&#39;s client, mark the row <code>processed</code> and commit.</li>
+<li>If the handler throws, roll back everything (including the handler&#39;s writes) and record <code>failed</code>, the attempt count and the error.</li>
+</ol>
+<p>The test suite runs this against real Postgres 16, including ten concurrent deliveries of a new event and ten concurrent retries of a previously failed one. The handler runs once in both. Removing the row lock makes the second test fail.</p>
+<p>The guarantee covers what the handler writes <strong>through <code>client</code></strong>. Calls to other systems (sending an email, calling another API) are not rolled back; make those idempotent on <code>event.eventKey</code> yourself.</p>
+<h2>Schema</h2>
+<p><code>sql/001_init.sql</code> creates two tables and is safe to run repeatedly:</p>
+<ul>
+<li><code>webhook_events</code>: one row per <code>(provider, event_key)</code> with the payload, <code>status</code> (<code>received</code> / <code>processed</code> / <code>failed</code>), attempts, last error and timestamps.</li>
+<li><code>payment_records</code>: one row per <code>(provider, reference)</code> you gave value for, with <code>amount_minor</code> (bigint, kobo/cents), currency and status. <code>recordPayment()</code> upserts it. This is what reconciliation reads.</li>
+</ul>
+<p>Drizzle users can import matching table definitions:</p>
+<pre><code class="language-ts">import { webhookEvents, paymentRecords } from &quot;webhook-ledger/drizzle&quot;;
+</code></pre>
+<h2>Reconciliation CLI</h2>
+<pre><code class="language-bash">export DATABASE_URL=postgres://…
+npx webhook-ledger migrate
+
+# Against the provider API (key from the environment only)
+PAYSTACK_SECRET_KEY=sk_test_… npx webhook-ledger reconcile --provider paystack --from 2026-11-01 --to 2026-12-01
+
+# Or against an exported list, no API key needed
+npx webhook-ledger reconcile --provider stripe --from 2026-11-01 --to 2026-12-01 --input stripe-export.json --json
+</code></pre>
+<p>It reports:</p>
+<ul>
+<li><code>missing_in_ledger</code>: the provider has a <strong>successful</strong> transaction you never recorded (abandoned checkouts are not drift)</li>
+<li><code>missing_at_provider</code>: you recorded a payment the provider does not have in that window</li>
+<li><code>amount_mismatch</code>, <code>currency_mismatch</code>, <code>status_mismatch</code></li>
+</ul>
+<p>Statuses are normalised across vocabularies (<code>success</code>, <code>successful</code>, <code>succeeded</code> are the same thing). Exit code is <code>0</code> with no drift, <code>1</code> with drift and <code>2</code> on errors, so it can run on a schedule and alert.</p>
+<p>Sources used: Paystack <code>GET /transaction</code> (amounts already in kobo), Flutterwave <code>GET /v3/transactions</code> (amounts in major units, converted with two decimals; pass <code>decimals: 0</code> from the API for zero-decimal currencies), Stripe <code>GET /v1/payment_intents</code> (cursor-paginated, reference is the PaymentIntent id).</p>
+<p>The <code>--input</code> file is a JSON array of <code>{ reference, amountMinor, currency, status, occurredAt? }</code>.</p>
+<h2>Limits (read before you rely on it)</h2>
+<ul>
+<li><strong>Tested against fixtures, not live accounts.</strong> The verifiers are tested with signatures computed from the documented schemes (and, for Stripe, cross-checked with Stripe&#39;s SDK). The API sources for reconciliation are tested against recorded response shapes. I have not run them against live provider accounts. Please open an issue if a real payload or response doesn&#39;t match.</li>
+<li><strong>Paystack&#39;s <code>Paystack-Signature</code> scheme is new</strong> (added to Paystack&#39;s docs in November 2026). This implementation follows the documented format; if Paystack changes details, the verifier needs to follow.</li>
+<li><strong>Flutterwave&#39;s <code>verif-hash</code> is a shared secret, not a signature over the body.</strong> It shows the sender knows your hash; it does not prove the body wasn&#39;t altered. Re-fetch the transaction from Flutterwave before giving value on high-value events, and run reconciliation. Flutterwave&#39;s newer signed-webhook header, if your account sends one, is not implemented yet.</li>
+<li><strong>Reconciliation compares references in a time window.</strong> Payments recorded near the window edges can show as <code>missing_*</code> if your <code>occurred_at</code> and the provider&#39;s timestamp fall on different sides. Overlap windows or rerun.</li>
+<li><strong>Refunds and partial captures</strong> are compared by status only; there is no refund ledger yet.</li>
+<li>Only Postgres. Only Express and Fastify adapters (anything else can call <code>handleWebhook(config, rawBody, headers)</code>).</li>
+<li>Not affiliated with Paystack, Flutterwave or Stripe.</li>
+</ul>
+<h2>Development</h2>
+<pre><code class="language-bash">npm install
+POSTGRES_URL=postgres://user@localhost:5432/webhook_ledger npm test
+npm run typecheck &amp;&amp; npm run lint &amp;&amp; npm run build
+</code></pre>
+<p>Database suites skip locally without <code>POSTGRES_URL</code>. In CI (<code>CI</code> set) a missing <code>POSTGRES_URL</code> is an error, so the suite can&#39;t go green by running nothing. CI runs on Node 18 (with Fastify 4) and Node 22 (with Fastify 5) against Postgres 16, then installs the packed tarball and runs the CLI.</p>
+<h2>Licence</h2>
+<p>MIT © Odinaka Robert Nnamani</p>
+
+</main>
+</body>
+</html>

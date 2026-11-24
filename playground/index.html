@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>webhook-ledger playground: sign and check payment webhooks</title>
+<meta name="description" content="Sign a test webhook body the way Paystack, Stripe or Flutterwave would, then check it with the same rules webhook-ledger uses. Runs entirely in your browser.">
+<style>
+:root { --bg:#fbfaf7; --fg:#1d1b18; --muted:#5e5a53; --line:#e4e0d8; --code:#f2efe8; --accent:#0f6b4f; --bad:#a3271f; --good:#0f6b4f; }
+@media (prefers-color-scheme: dark) { :root { --bg:#15140f; --fg:#ece8df; --muted:#a8a296; --line:#2e2b25; --code:#211f19; --accent:#5fd0a5; --bad:#f08a80; --good:#5fd0a5; } }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 860px; margin: 0 auto; padding: 32px 16px 80px; }
+header.top { display:flex; flex-wrap:wrap; gap:12px 20px; justify-content:space-between; border-bottom:1px solid var(--line); padding-bottom:12px; font-size:14px; color:var(--muted); }
+a { color: var(--accent); }
+h1 { font-size: 1.9rem; margin: 24px 0 8px; letter-spacing:-0.02em; }
+p.lede { color: var(--muted); margin-top: 0; }
+label { display:block; font-weight:600; font-size:14px; margin: 18px 0 6px; }
+.hint { font-weight:400; color:var(--muted); }
+input, select, textarea { width:100%; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--fg); background:var(--code); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+textarea { min-height: 150px; resize: vertical; }
+.row { display:grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+@media (max-width: 600px) { .row { grid-template-columns: 1fr; } }
+.actions { display:flex; flex-wrap:wrap; gap:10px; margin-top:18px; }
+button { font: 600 14px/1 ui-sans-serif, system-ui, sans-serif; padding: 11px 16px; border-radius: 8px; border:1px solid var(--accent); background: var(--accent); color: var(--bg); cursor:pointer; }
+button.secondary { background: transparent; color: var(--accent); }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#result { margin-top: 20px; padding: 14px 16px; border-radius: 8px; border:1px solid var(--line); background: var(--code); min-height: 3em; }
+#result.ok { border-color: var(--good); }
+#result.bad { border-color: var(--bad); }
+#result strong.ok { color: var(--good); }
+#result strong.bad { color: var(--bad); }
+pre { background: var(--code); padding: 12px 14px; border-radius: 8px; overflow-x:auto; border:1px solid var(--line); font-size: 13px; white-space: pre-wrap; word-break: break-all; }
+code { font: 0.9em ui-monospace, SFMono-Regular, Menlo, monospace; }
+</style>
+</head>
+<body>
+<main>
+<header class="top"><span><a href="../">webhook-ledger docs</a> · Playground</span><span><a href="https://github.com/Robertpaschal/webhook-ledger">GitHub</a></span></header>
+<h1>Sign and check a webhook</h1>
+<p class="lede">Produce the signature header a provider would send for a body, then check it with the same rules the library uses. Change one character of the body, the secret or the timestamp and check again to see why the raw bytes matter. Everything runs in this page with Web Crypto; nothing is sent anywhere. Use test secrets only.</p>
+
+<label for="provider">Provider</label>
+<select id="provider">
+  <option value="paystack">Paystack: Paystack-Signature (HMAC-SHA512 over "{t}.{body}")</option>
+  <option value="paystack-legacy">Paystack, deprecated: X-Paystack-Signature (HMAC-SHA512 of the body)</option>
+  <option value="stripe">Stripe: Stripe-Signature (HMAC-SHA256 over "{t}.{body}")</option>
+  <option value="flutterwave">Flutterwave: verif-hash (equals your secret hash)</option>
+</select>
+
+<label for="body">Raw body <span class="hint">(exactly the bytes the provider sends)</span></label>
+<textarea id="body" spellcheck="false"></textarea>
+
+<div class="row">
+  <div>
+    <label for="secret"><span id="secret-label">Secret</span></label>
+    <input id="secret" spellcheck="false" autocomplete="off">
+  </div>
+  <div>
+    <label for="t">Timestamp <span class="hint">(unix seconds; tolerance 300s)</span></label>
+    <input id="t" inputmode="numeric">
+  </div>
+</div>
+
+<label for="header"><span id="header-label">Header value</span></label>
+<input id="header" spellcheck="false" autocomplete="off">
+
+<div class="actions">
+  <button id="sign" type="button">Sign body</button>
+  <button id="check" type="button" class="secondary">Check header</button>
+  <button id="tamper" type="button" class="secondary">Tamper with body</button>
+</div>
+
+<div id="result" role="status" aria-live="polite">Press <em>Sign body</em>, then <em>Check header</em>.</div>
+
+<label>What was signed</label>
+<pre id="signed"></pre>
+
+<p class="lede">On a server, use the library instead of this page: it reads the raw request body, compares in constant time, and records the event once in Postgres. See the <a href="../">docs</a>.</p>
+</main>
+<script type="module">
+import { PROVIDERS, check, sign } from "./webhook-crypto.js";
+
+const $ = (id) => document.getElementById(id);
+const samples = {
+  paystack: { secret: "whsec_test_playground_only", body: { event: "charge.success", data: { id: 302961, reference: "ord_1042", amount: 250000, currency: "NGN", status: "success" } } },
+  "paystack-legacy": { secret: "sk_test_playground_only", body: { event: "charge.success", data: { id: 302961, reference: "ord_1042", amount: 250000, currency: "NGN", status: "success" } } },
+  stripe: { secret: "whsec_test_playground_only", body: { id: "evt_test_1042", type: "payment_intent.succeeded", data: { object: { id: "pi_test_1042", amount: 2500, currency: "usd", status: "succeeded" } } } },
+  flutterwave: { secret: "playground-secret-hash", body: { event: "charge.completed", data: { id: 285959875, tx_ref: "ord_1042", amount: 2500, currency: "NGN", status: "successful" } } },
+};
+const now = () => Math.floor(Date.now() / 1000);
+
+function load(provider) {
+  const s = samples[provider];
+  $("body").value = JSON.stringify(s.body);
+  $("secret").value = s.secret;
+  $("t").value = String(now());
+  $("header").value = "";
+  $("secret-label").textContent = PROVIDERS[provider].secretLabel;
+  $("header-label").textContent = PROVIDERS[provider].header + " header value";
+  $("t").disabled = provider === "paystack-legacy" || provider === "flutterwave";
+  showSigned();
+  setResult(null, "Press <em>Sign body</em>, then <em>Check header</em>.");
+}
+
+function showSigned() {
+  const p = $("provider").value;
+  const body = $("body").value;
+  $("signed").textContent =
+    p === "flutterwave" ? "Nothing is signed: Flutterwave sends your secret hash as-is in verif-hash."
+    : p === "paystack-legacy" ? body
+    : `${$("t").value}.${body}`;
+}
+
+function setResult(kind, html) {
+  const el = $("result");
+  el.className = kind ?? "";
+  el.innerHTML = html;
+}
+
+const escape = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+$("provider").addEventListener("change", (e) => load(e.target.value));
+for (const id of ["body", "t"]) $(id).addEventListener("input", showSigned);
+
+$("sign").addEventListener("click", async () => {
+  const p = $("provider").value;
+  const h = await sign(p, { body: $("body").value, secret: $("secret").value, t: Number($("t").value) });
+  $("header").value = h.value;
+  showSigned();
+  setResult(null, `Signed. <code>${escape(h.name)}</code> is filled in. Now press <em>Check header</em>.`);
+});
+
+$("check").addEventListener("click", async () => {
+  const p = $("provider").value;
+  const r = await check(p, { body: $("body").value, secret: $("secret").value, header: $("header").value, now: now() });
+  const note = p === "flutterwave" ? " Note that verif-hash does not cover the body, so a changed body still passes: confirm the transaction with Flutterwave's API before giving value." : "";
+  if (r.ok) setResult("ok", `<strong class="ok">Verified.</strong> The library would accept this delivery and record it once.${note}`);
+  else setResult("bad", `<strong class="bad">Rejected: ${escape(r.reason)}.</strong> ${escape(r.message)} The library would answer 401 (400 for invalid JSON) and write nothing.`);
+});
+
+$("tamper").addEventListener("click", () => {
+  // Re-serialise with spacing: same JSON value, different bytes. This is the
+  // classic bug of verifying JSON.stringify(req.body) instead of the raw body.
+  try {
+    $("body").value = JSON.stringify(JSON.parse($("body").value), null, 1);
+    setResult(null, "Re-serialised the body: same JSON value, different bytes. Press <em>Check header</em>.");
+  } catch {
+    $("body").value += " ";
+    setResult(null, "Added a space to the body. Press <em>Check header</em>.");
+  }
+  showSigned();
+});
+
+load($("provider").value);
+</script>
+</body>
+</html>
