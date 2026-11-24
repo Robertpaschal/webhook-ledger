@@ -29,7 +29,7 @@
     "node": ">=18"
   },
   "bin": {
-    "webhook-ledger": "./dist/cli.js"
+    "webhook-ledger": "dist/cli.js"
   },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
