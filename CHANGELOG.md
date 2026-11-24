@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Docs: a browser [playground](https://robertpaschal.github.io/webhook-ledger/playground/) that signs and checks Paystack, Stripe and Flutterwave webhooks with Web Crypto. `tests/playground.test.ts` cross-checks it against the verifiers in both directions. Not part of the npm package.
+
 ## 0.1.0 (2026-11-23)
 
 First release.

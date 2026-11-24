@@ -1,5 +1,5 @@
 // Builds the GitHub Pages site from README.md so the docs cannot drift from it.
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { marked } from "marked";
 
 const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8")
@@ -37,7 +37,7 @@ th { background: var(--code); }
 </head>
 <body>
 <main>
-<header class="top"><span>v${pkg.version} · MIT</span><span><a href="https://github.com/Robertpaschal/webhook-ledger">GitHub</a> · <a href="https://www.npmjs.com/package/webhook-ledger">npm</a> · <a href="https://github.com/Robertpaschal/webhook-ledger/issues">Issues</a></span></header>
+<header class="top"><span>v${pkg.version} · MIT</span><span><a href="playground/">Playground</a> · <a href="https://github.com/Robertpaschal/webhook-ledger">GitHub</a> · <a href="https://www.npmjs.com/package/webhook-ledger">npm</a> · <a href="https://github.com/Robertpaschal/webhook-ledger/issues">Issues</a></span></header>
 ${body}
 </main>
 </body>
@@ -46,4 +46,6 @@ ${body}
 mkdirSync(new URL("../site/", import.meta.url), { recursive: true });
 writeFileSync(new URL("../site/index.html", import.meta.url), html);
 writeFileSync(new URL("../site/.nojekyll", import.meta.url), "");
-console.log("site/index.html written");
+// The playground is static: an HTML page and the Web Crypto module it imports.
+cpSync(new URL("../docs/playground/", import.meta.url), new URL("../site/playground/", import.meta.url), { recursive: true });
+console.log("site/index.html and site/playground/ written");

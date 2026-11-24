@@ -120,6 +120,10 @@ Every verifier refuses a parsed object (`invalid_body`) rather than guessing its
 
 Pass `eventKey: (payload) => string` in the options to choose your own. Keys are unique per provider.
 
+### Try it in the browser
+
+The [playground](https://robertpaschal.github.io/webhook-ledger/playground/) signs a test body the way each provider would and checks it with the same rules, so you can watch a re-serialised body, a stale timestamp or the wrong secret fail. It runs entirely in the page with Web Crypto. Its signing code is tested against the library in both directions (`tests/playground.test.ts`), so the two cannot drift silently. It is a teaching aid: on a server, use the library.
+
 ## How "once" is enforced
 
 `Ledger.process(event, handler)` runs in one transaction:
